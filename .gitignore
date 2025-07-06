@@ -8,3 +8,8 @@ venv/
 /data/raw/*
 /data/processed/*
 /models/*
+notebooks/test_*.ipynb
+notebooks/debug_*.ipynb
+notebooks/tmp_*.ipynb
+notebooks/*scratch*.ipynb
+notebooks/*experiment*.ipynb
