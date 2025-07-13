@@ -1,4 +1,14 @@
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import LabelEncoder
+import joblib
+import os
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
+ARTIFACTS_DIR = os.path.join(BASE_DIR,'artifacts')
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+
 
 def load_dataset(file_path: str,column_names: list ) -> pd.DataFrame:
 
@@ -45,8 +55,18 @@ def drop_constant_cols(df : pd.DataFrame) -> pd.DataFrame:
     else:
         print("No constant columns found")
         return df
+    
 
-'''
+def reduce_rare_services(df: pd.DataFrame , threshold : int = 1000) -> pd.DataFrame:
+    service_counts = df['service'].value_counts()
+    rare_services = service_counts[service_counts < threshold].index.tolist()
+
+    print(f"Reducing {len(rare_services)} rare services to 'rare'")
+
+    df['service'] = df['service'].apply(lambda x: 'rare' if x in rare_services else x)
+
+    return df    
+
 
 def encode_categorical_features(df: pd.DataFrame) -> pd.DataFrame:
 
@@ -57,8 +77,67 @@ def encode_categorical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     print(f'categorical columns to encode: {cat_cols}')
 
-    encoded_df = pd.get_dummies(df, columns=cat_cols , drop_first=True)
-'''
+    encoded_df = pd.get_dummies(df, columns=cat_cols )
+
+    return encoded_df
+
+
+def scale_features(df: pd.DataFrame , save_path : str = None) -> pd.DataFrame:
+    scaler = MinMaxScaler()
+
+    features = df.drop(columns=['label'])
+    labels = df['label'].reset_index(drop=True)
+
+    
+    num_cols = features.select_dtypes(include=['int64', 'float64']).columns
+
+   
+    scaled_array = scaler.fit_transform(features[num_cols])
+
+    
+    scaled_df = features.copy()
+    scaled_df[num_cols] = scaled_array
+
+    
+    scaled_df['label'] = labels
+
+    if save_path is None:
+        save_path = os.path.join(ARTIFACTS_DIR, 'scaler.pkl')
+
+    
+
+    joblib.dump(scaler , save_path)
+    print(f"scaler saved to {save_path}")
+
+    print(f"Scaled numerical columns: {list(num_cols)}")
+    return scaled_df
+
+
+def encode_labels(df: pd.DataFrame , save_path: str = None) -> pd.DataFrame:
+    encoder = LabelEncoder()
+    df['label'] = encoder.fit_transform(df['label'])
+
+    if save_path is None:
+        save_path = os.path.join(ARTIFACTS_DIR, 'label_encoder.pkl')
+
+    
+    joblib.dump(encoder , save_path)
+
+    print("Labels encoded and encoder saved to ",save_path)
+    return df
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
