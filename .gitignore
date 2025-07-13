@@ -13,3 +13,5 @@ notebooks/debug_*.ipynb
 notebooks/tmp_*.ipynb
 notebooks/*scratch*.ipynb
 notebooks/*experiment*.ipynb
+artifacts/
+
