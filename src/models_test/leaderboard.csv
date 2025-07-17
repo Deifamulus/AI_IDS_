@@ -1,0 +1,2 @@
+Model,Best_F1_CV,Test_Accuracy,Best_Params
+random_forest,0.773079507988863,0.9263034228741983,"{'max_depth': 8, 'n_estimators': 38}"
