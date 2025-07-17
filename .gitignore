@@ -15,4 +15,4 @@ notebooks/*scratch*.ipynb
 notebooks/*experiment*.ipynb
 artifacts/
 model_train_test.py
-/models_test/*
+src/models_test/
