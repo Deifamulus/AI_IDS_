@@ -16,3 +16,5 @@ notebooks/*experiment*.ipynb
 artifacts/
 model_train_test.py
 src/models_test/
+src/models
+
