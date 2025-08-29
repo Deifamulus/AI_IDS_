@@ -20,7 +20,7 @@ import json
 
 warnings.filterwarnings("ignore")
 
-DATA_PATH = '../data/processed/processed_kdd.csv'
+DATA_PATH = '../data/processed/merged_for_retraining.csv'
 MODEL_DIR = 'models'
 os.makedirs(MODEL_DIR, exist_ok=True)
 
