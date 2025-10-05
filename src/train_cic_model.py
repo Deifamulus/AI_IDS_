@@ -143,19 +143,49 @@ class CICModelTrainer:
         
         return self.df
     
-    def split_data(self, test_size: float = 0.2, random_state: int = 42):
-        """Split data into train and test sets"""
-        print(f"\nSplitting data (test_size={test_size})...")
+    def split_data(self, test_size: float = 0.2, random_state: int = 42, min_samples: int = 2):
+        """
+        Split data into train and test sets, ensuring each class has at least min_samples.
+        
+        Args:
+            test_size: Proportion of the dataset to include in the test split
+            random_state: Random seed for reproducibility
+            min_samples: Minimum number of samples required per class
+        """
+        print(f"\nSplitting data (test_size={test_size}, min_samples={min_samples})...")
         
         X = self.df.drop(columns=['label'])
         y = self.df['label']
         
+        # Filter out classes with fewer than min_samples
+        class_counts = y.value_counts()
+        valid_classes = class_counts[class_counts >= min_samples].index
+        mask = y.isin(valid_classes)
+        X_filtered = X[mask]
+        y_filtered = y[mask]
+        
+        if len(valid_classes) < len(class_counts):
+            print(f"Filtered out {len(class_counts) - len(valid_classes)} classes with <{min_samples} samples")
+            print(f"Kept {len(valid_classes)} classes with ≥{min_samples} samples each")
+            
+            # Print removed classes for debugging
+            removed_classes = set(class_counts.index) - set(valid_classes)
+            if len(removed_classes) > 0:
+                print("Removed classes:", ", ".join(removed_classes))
+        
+        # Split the filtered data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state, stratify=y
+            X_filtered, 
+            y_filtered, 
+            test_size=test_size, 
+            random_state=random_state, 
+            stratify=y_filtered
         )
         
         print(f"Training set: {len(self.X_train)} samples")
         print(f"Test set: {len(self.X_test)} samples")
+        print("Class distribution in training set:")
+        print(self.y_train.value_counts())
         
         return self.X_train, self.X_test, self.y_train, self.y_test
     

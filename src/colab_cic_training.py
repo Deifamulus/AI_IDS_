@@ -88,6 +88,7 @@ def run_pipeline(
     no_tune: bool,
     test_size: float,
     n_iter: int,
+    min_samples: int,
     mount_drive: bool,
     install_req: bool,
 ):
@@ -152,7 +153,7 @@ def run_pipeline(
     print("-" * 80)
     trainer = CICModelTrainer(data_path=preprocessed_data_path, model_dir=model_dir)
     trainer.load_data()
-    trainer.split_data(test_size=test_size)
+    trainer.split_data(test_size=test_size, min_samples=min_samples)
 
     if model == 'all':
         trainer.train_all_models(use_smote=(not no_smote), tune_hyperparams=(not no_tune))
@@ -183,37 +184,29 @@ def main():
 
     # IO and environment
     parser.add_argument("--input", type=str, required=True, help="Path to CIC dataset (CSV/Parquet) or directory")
-    parser.add_argument("--output-dir", type=str, required=True, help="Directory on Drive to save outputs")
     parser.add_argument("--dataset-type", type=str, default="CIC-IDS2017", help="Dataset type label")
     parser.add_argument("--mount-drive", action="store_true", help="Mount Google Drive at /content/drive")
     parser.add_argument("--install-req", action="store_true", help="Install requirements.txt (Colab)")
 
     # Preprocessing
     parser.add_argument("--binary", action="store_true", help="Use binary labels (BENIGN vs ATTACK)")
-    parser.add_argument("--sample-frac", type=float, default=None, help="Sample fraction for quick runs (0-1)")
-    parser.add_argument("--feature-selection", type=str, default="variance", choices=["variance", "correlation", "all"], help="Feature selection method")
-    parser.add_argument("--n-features", type=int, default=None, help="Limit number of features after selection")
-    parser.add_argument("--balance", action="store_true", help="Balance classes via undersampling")
-    parser.add_argument("--max-samples", type=int, default=None, help="Max samples per class (if --balance)")
 
     # Training
     parser.add_argument("--model", type=str, default="all", choices=["all", "random_forest", "xgboost", "logistic_regression", "gradient_boosting", "knn", "decision_tree"], help="Which model to train")
     parser.add_argument("--no-smote", action="store_true", help="Disable SMOTE oversampling")
-    parser.add_argument("--no-tune", action="store_true", help="Disable hyperparameter tuning")
-    parser.add_argument("--test-size", type=float, default=0.2, help="Test split size (0-1)")
-    parser.add_argument("--n-iter", type=int, default=20, help="Hyperparameter search iterations")
-
+    parser.add_argument("--no-tune", action="store_true", help="Skip hyperparameter tuning")
+    parser.add_argument("--test-size", type=float, default=0.2, help="Test set size (0-1)")
+    parser.add_argument("--n-iter", type=int, default=10, help="Number of iterations for hyperparameter search")
+    parser.add_argument("--min-samples", type=int, default=2, help="Minimum samples required per class (default: 2)")
+    
     args = parser.parse_args()
-
-    if args.sample_frac is not None and not (0 < args.sample_frac <= 1):
-        parser.error("--sample-frac must be in (0, 1]")
+    
     if not (0 < args.test_size < 1):
         parser.error("--test-size must be in (0, 1)")
 
     run_pipeline(
         input_path=args.input,
         output_dir=args.output_dir,
-        dataset_type=args.dataset_type,
         binary=args.binary,
         sample_frac=args.sample_frac,
         feature_selection=args.feature_selection,
@@ -225,6 +218,7 @@ def main():
         no_tune=args.no_tune,
         test_size=args.test_size,
         n_iter=args.n_iter,
+        min_samples=args.min_samples,
         mount_drive=args.mount_drive,
         install_req=args.install_req,
     )
