@@ -184,12 +184,18 @@ def main():
 
     # IO and environment
     parser.add_argument("--input", type=str, required=True, help="Path to CIC dataset (CSV/Parquet) or directory")
+    parser.add_argument("--output-dir", type=str, default="./outputs", help="Directory to save outputs")
     parser.add_argument("--dataset-type", type=str, default="CIC-IDS2017", help="Dataset type label")
     parser.add_argument("--mount-drive", action="store_true", help="Mount Google Drive at /content/drive")
     parser.add_argument("--install-req", action="store_true", help="Install requirements.txt (Colab)")
 
     # Preprocessing
     parser.add_argument("--binary", action="store_true", help="Use binary labels (BENIGN vs ATTACK)")
+    parser.add_argument("--sample-frac", type=float, default=None, help="Sample fraction for quick runs (0-1)")
+    parser.add_argument("--feature-selection", type=str, default="variance", choices=["variance", "correlation", "all"], help="Feature selection method")
+    parser.add_argument("--n-features", type=int, default=None, help="Number of features to select")
+    parser.add_argument("--balance", action="store_true", help="Balance classes")
+    parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples per class")
 
     # Training
     parser.add_argument("--model", type=str, default="all", choices=["all", "random_forest", "xgboost", "logistic_regression", "gradient_boosting", "knn", "decision_tree"], help="Which model to train")
