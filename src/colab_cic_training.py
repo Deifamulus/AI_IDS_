@@ -213,6 +213,7 @@ def main():
     run_pipeline(
         input_path=args.input,
         output_dir=args.output_dir,
+        dataset_type=args.dataset_type,
         binary=args.binary,
         sample_frac=args.sample_frac,
         feature_selection=args.feature_selection,
