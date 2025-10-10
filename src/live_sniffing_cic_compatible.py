@@ -28,13 +28,24 @@ from feature_extractor_patched_final import extract_features, flow_tracker
 from typing import Dict, List, Optional, Any, Tuple
 
 # Import enhanced detection components
-from enhanced_detection import (
-    AdvancedAttackDetector,
-    OptimizedPacketProcessor,
-    extract_flow_features,
-    calculate_entropy,
-    calculate_printable_ratio
-)
+try:
+    from enhanced_detection import (
+        AdvancedAttackDetector,
+        OptimizedPacketProcessor,
+        extract_flow_features,
+        calculate_entropy,
+        calculate_printable_ratio
+    )
+    ENHANCED_DETECTION_AVAILABLE = True
+except ImportError as e:
+    print(f"[!] Enhanced detection module not available: {e}")
+    print("[*] Falling back to basic detection mode")
+    ENHANCED_DETECTION_AVAILABLE = False
+    AdvancedAttackDetector = None
+    OptimizedPacketProcessor = None
+    extract_flow_features = None
+    calculate_entropy = None
+    calculate_printable_ratio = None
 
 # Configuration
 DEFAULT_INTERFACE = "eth0"
@@ -134,6 +145,13 @@ last_report_time = time.time()
 connection_tracker = None  # Will be initialized in main()
 attack_detector = None
 packet_processor = None
+flow_tracker = defaultdict(lambda: {
+    "packet_count": 0,
+    "byte_count": 0,
+    "timestamps": [],
+    "start_time": time.time(),
+    "flags": {"SYN": 0, "ACK": 0, "FIN": 0, "RST": 0},
+})
 
 # Performance monitoring
 performance_stats = {
@@ -171,6 +189,11 @@ COMMON_PORTS = {
     49155, 49156, 49157, 50000, 50010, 50020, 50030, 50060, 50070, 50075, 50090,
     54321, 56000, 56789, 60000, 60010, 60030, 61616, 62078, 64738
 }
+
+# Cache for recent decisions to avoid redundant processing
+DECISION_CACHE = {}
+CACHE_SIZE = 10000  # Maximum number of cache entries
+
 class RateLimiter:
     def __init__(self, max_events=100, time_window=60):
         self.events = []
@@ -193,45 +216,6 @@ class RateLimiter:
 
 # Initialize rate limiter for high traffic
 rate_limiter = RateLimiter(max_events=5000, time_window=60)  # Increased limit for high traffic
-
-# Performance monitoring
-performance_stats = {
-    'total_packets': 0,
-    'processed_packets': 0,
-    'dropped_packets': 0,
-    'last_report': time.time(),
-    'batch_size': 50,  # Process packets in batches
-    'batch_count': 0,
-    'last_batch_time': time.time(),
-    'attack_detected': 0,  # Track number of attacks detected
-    'errors': 0,  # Track number of errors
-    'last_alert_time': 0  # Timestamp of last alert
-}
-
-# Common benign ports for fast filtering
-COMMON_PORTS = {
-    # Web
-    80, 443, 8080, 8443, 8000, 8008, 8081, 8088, 8888,  # HTTP/HTTPS
-    21, 22, 23, 25, 53, 67, 68, 69, 110, 123, 137, 138, 139, 143, 161, 162, 389, 443,
-    445, 465, 514, 515, 548, 587, 631, 636, 993, 995, 1025, 1026, 1027, 1028, 1029,
-    1080, 1194, 1433, 1434, 1521, 1701, 1723, 1900, 2049, 2082, 2083, 2086, 2087,
-    2095, 2096, 3000, 3128, 3306, 3389, 4000, 4040, 4369, 4500, 4567, 4711, 4712,
-    5000, 5001, 5002, 5003, 5004, 5005, 5060, 5104, 5106, 5222, 5223, 5228, 5353,
-    5432, 5601, 5672, 5900, 5938, 5984, 6000, 6379, 6666, 7000, 7077, 7474, 7547,
-    7575, 8000, 8005, 8009, 8020, 8042, 8069, 8080, 8081, 8083, 8088, 8089, 8090,
-    8091, 8095, 8096, 8100, 8140, 8172, 8181, 8200, 8222, 8243, 8280, 8281, 8333,
-    8400, 8443, 8500, 8530, 8531, 8880, 8888, 8983, 9000, 9001, 9002, 9042, 9060,
-    9080, 9090, 9091, 9092, 9100, 9140, 9160, 9200, 9300, 9418, 9443, 9600, 9800,
-    9981, 10000, 10250, 10255, 10443, 11080, 11371, 12018, 12046, 12443, 14000,
-    16000, 16992, 16993, 18080, 18081, 18091, 18092, 20000, 27017, 27018, 27019,
-    28017, 32400, 32768, 35357, 44818, 47001, 47002, 47808, 49152, 49153, 49154,
-    49155, 49156, 49157, 50000, 50010, 50020, 50030, 50060, 50070, 50075, 50090,
-    54321, 56000, 56789, 60000, 60010, 60030, 61616, 62078, 64738
-}
-
-# Cache for recent decisions to avoid redundant processing
-DECISION_CACHE = {}
-CACHE_SIZE = 10000  # Maximum number of cache entries
 
 
 def load_cic_model(model_path: str, encoder_path: str = None, 
@@ -486,20 +470,18 @@ def map_pcap_features_to_cic(pcap_features: dict) -> dict:
             except (ValueError, TypeError):
                 pass
         
-        # Debug: Print non-zero features
-        if int(time.time()) % 10 == 0:  # Print every 10 seconds
+        # Debug: Print non-zero features (reduced frequency)
+        if int(time.time()) % 30 == 0:  # Print every 30 seconds
             non_zero = {k: v for k, v in cic_features.items() if v != 0 and not k.startswith('flag_') and k != 'flag'}
             print(f"\n--- Non-zero CIC features ({len(non_zero)}/{len(cic_features)}) ---")
             for k, v in sorted(non_zero.items()):
                 print(f"  {k}: {v}")
-        
+
     except Exception as e:
         print(f"Error in map_pcap_features_to_cic: {e}")
         import traceback
         traceback.print_exc()
-    
-    return cic_features
-    
+
     return cic_features
 
 
@@ -779,51 +761,8 @@ class FastConnectionTracker:
                               if k not in stale}
 
 class ConnectionTracker(FastConnectionTracker):
-    """Legacy compatibility class"""
+    """Legacy compatibility class - uses FastConnectionTracker implementation"""
     pass
-    def __init__(self):
-        self.connections = {}  # key: (src_ip, dst_ip, protocol, src_port, dst_port)
-        self.timeout = 300  # 5 minutes
-        
-    def update(self, packet):
-        key = self._get_connection_key(packet)
-        current_time = time.time()
-        
-        if key not in self.connections:
-            self.connections[key] = {
-                'start_time': current_time,
-                'last_seen': current_time,
-                'packet_count': 1,
-                'bytes_sent': packet.get('length', 0),
-                'flags': set()
-            }
-        else:
-            conn = self.connections[key]
-            conn['last_seen'] = current_time
-            conn['packet_count'] += 1
-            conn['bytes_sent'] += packet.get('length', 0)
-            
-        # Add TCP flags if present
-        if 'tcp_flags' in packet:
-            self.connections[key]['flags'].update(packet['tcp_flags'])
-            
-        self._cleanup_old_connections()
-        
-    def _get_connection_key(self, packet):
-        return (
-            packet.get('src_ip'), 
-            packet.get('dst_ip'),
-            packet.get('protocol'),
-            packet.get('sport', 0),
-            packet.get('dport', 0)
-        )
-        
-    def _cleanup_old_connections(self):
-        current_time = time.time()
-        stale = [k for k, v in self.connections.items() 
-                if current_time - v['last_seen'] > self.timeout]
-        for k in stale:
-            del self.connections[k]
 
 class RateLimiter:
     def __init__(self, max_events=100, time_window=60):
@@ -937,38 +876,7 @@ def is_port_scan_enhanced(packet):
             
             if len(scan_info['targets']) >= scan_detection['port_scan_threshold']:
                 return f"VERTICAL_PORT_SCAN from {src_ip} (port {dst_port} to {len(scan_info['targets'])} hosts)"
-    
-    return False
-    if src_ip not in scan_detection['recent_scans']:
-        scan_detection['recent_scans'][src_ip] = {
-            'ports': set(),
-            'start_time': current_time,
-            'last_seen': current_time
-        }
-    
-    # Get scan data for this source IP
-    scan_data = scan_detection['recent_scans'][src_ip]
-    scan_data['ports'].add(dst_port)
-    scan_data['last_seen'] = current_time
-    
-    # Check if we should trigger a scan alert
-    port_count = len(scan_data['ports'])
-    time_elapsed = current_time - scan_data['start_time']
-    
-    # Reset the window if it's been too long
-    if time_elapsed > scan_detection['port_scan_window']:
-        scan_data['ports'] = {dst_port}  # Reset with current port
-        scan_data['start_time'] = current_time
-        return False
-    
-    # Check if this looks like a port scan
-    if port_count >= scan_detection['port_scan_threshold']:
-        # Rate limit alerts (one per minute per source IP)
-        last_alert = scan_detection['last_scan_alert'].get(src_ip, 0)
-        if current_time - last_alert > 60:  # 60 seconds cooldown
-            scan_detection['last_scan_alert'][src_ip] = current_time
-            return True
-    
+
     return False
 
 def is_benign_port(port):
@@ -1027,14 +935,18 @@ def update_performance_stats(processed=True):
 def initialize_detection_components(model_path=None, scaler_path=None, feature_columns=None):
     """Initialize attack detection components"""
     global attack_detector, packet_processor
-    
+
+    if not ENHANCED_DETECTION_AVAILABLE:
+        print("[!] Enhanced detection not available, skipping initialization")
+        return
+
     # Configure attack detector
     config = {
         'model_path': model_path,
         'scaler_path': scaler_path,
         'feature_columns': feature_columns or []
     }
-    
+
     attack_detector = AdvancedAttackDetector(config)
     packet_processor = OptimizedPacketProcessor(
         detector=attack_detector,
@@ -1042,14 +954,14 @@ def initialize_detection_components(model_path=None, scaler_path=None, feature_c
         max_workers=4
     )
     packet_processor.start()
-    
+
     # Set up signal handler for graceful shutdown
     def signal_handler(sig, frame):
         print("\nShutting down packet processor...")
         if packet_processor:
             packet_processor.stop()
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
 
 
@@ -1087,48 +999,31 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
     # Update total packets counter
     performance_stats['total_packets'] += 1
     performance_stats['last_packet_time'] = time.time()
-    
-    # Print a dot for each packet to show activity (but limit to 100 dots per line)
-    if performance_stats['total_packets'] % 100 != 0:
-        print('.', end='', flush=True)
-    else:
-        print('.', flush=True)  # New line every 100 packets
-    
-    # Debug: Print packet info for first few packets and periodically
+
+    # Simplified activity indicator (only every 100 packets)
     current_time = time.time()
-    if (performance_stats['total_packets'] <= 5 or 
-        (current_time - performance_stats.get('last_debug_output', 0) > 5.0)):  # Every 5 seconds
-        performance_stats['last_debug_output'] = current_time
+    if performance_stats['total_packets'] % 100 == 0:
+        print('.', end='', flush=True)
+
+    # Debug: Print packet info only for first few packets
+    if performance_stats['total_packets'] <= 3:
         print(f"\n[DEBUG] Packet #{performance_stats['total_packets']}:")
-        
+
         try:
             # Basic packet info
             print(f"    Time: {time.strftime('%H:%M:%S', time.localtime(current_time))}")
             print(f"    Type: {type(pkt).__name__}")
-            
-            # Layer information
-            layers = []
-            if hasattr(pkt, 'layers'):
-                layers = [l.name for l in pkt.layers() if hasattr(l, 'name')]
-            print(f"    Layers: {layers}")
-            
+
             # IP layer info
             if pkt.haslayer('IP'):
                 ip = pkt['IP']
                 print(f"    IP: {ip.src} -> {ip.dst} proto={ip.proto}")
-                if hasattr(ip, 'sport') and hasattr(ip, 'dport'):
-                    print(f"    Ports: {ip.sport} -> {ip.dport}")
-            
-            # IPv6 layer info
             elif pkt.haslayer('IPv6'):
                 ipv6 = pkt['IPv6']
                 print(f"    IPv6: {ipv6.src} -> {ipv6.dst} nh={ipv6.nh}")
-                if hasattr(ipv6, 'sport') and hasattr(ipv6, 'dport'):
-                    print(f"    Ports: {ipv6.sport} -> {ipv6.dport}")
-            
-            # Packet length
+
             print(f"    Length: {len(pkt)} bytes")
-            
+
         except Exception as e:
             print(f"    Error getting packet details: {str(e)}")
     
@@ -1166,15 +1061,14 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
                 dport = pkt.dport if hasattr(pkt, 'dport') else 0
                 ttl = ip_layer.hlim if hasattr(ip_layer, 'hlim') else 0
                 
-            # Log periodic summary
-            if performance_stats['total_packets'] % 100 == 0:
+            # Log periodic summary (every 500 packets)
+            if performance_stats['total_packets'] % 500 == 0:
                 elapsed = time.time() - performance_stats.get('last_summary', current_time)
-                pps = 100 / elapsed if elapsed > 0 else 0
+                pps = 500 / elapsed if elapsed > 0 else 0
                 print(f"\n[+] Packets: {performance_stats['total_packets']} | "
                       f"Processed: {performance_stats.get('processed_packets', 0)} | "
                       f"Dropped: {performance_stats.get('dropped_packets', 0)} | "
                       f"Rate: {pps:.1f} pps")
-                print(f"    Current: {src_ip}:{sport} -> {dst_ip}:{dport} proto={proto}")
                 performance_stats['last_summary'] = current_time
                 
         except Exception as e:
@@ -1182,15 +1076,10 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
             performance_stats['dropped_packets'] = performance_stats.get('dropped_packets', 0) + 1
             return True
         
-        # Print packet info every 10 packets
-        if performance_stats['total_packets'] % 10 == 0:
+        # Reduced packet info logging (every 200 packets)
+        if performance_stats['total_packets'] % 200 == 0:
             print(f"\n[+] Packets processed: {performance_stats['total_packets']}")
             print(f"    Last packet: {src_ip}:{sport} -> {dst_ip}:{dport} proto={proto}")
-            try:
-                print(f"    Packet layers: {[l.name for l in pkt.layers() if hasattr(l, 'name')]}")
-                print(f"    Packet summary: {pkt.summary()}")
-            except Exception as e:
-                print(f"    Could not get packet details: {e}")
         
         # Create a cache key for this flow
         cache_key = (src_ip, dst_ip, proto, sport, dport)
@@ -1231,17 +1120,22 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
         
         # Generate flow ID for feature extraction
         flow_id = f"{src_ip}-{dst_ip}-{proto}-{sport}-{dport}"
-        
+
         # Extract features using enhanced feature extractor
         try:
-            if 'extract_flow_features' not in globals():
-                print("\n[!] extract_flow_features function not found!")
-                return True
-                
-            features = extract_flow_features(pkt, flow_tracker, flow_id)
-            if not isinstance(features, dict):
-                print(f"\n[!] Invalid features format: {type(features)}")
-                return True
+            if ENHANCED_DETECTION_AVAILABLE and extract_flow_features:
+                features = extract_flow_features(pkt, flow_tracker, flow_id)
+                if not isinstance(features, dict):
+                    print(f"\n[!] Invalid features format: {type(features)}")
+                    return True
+            else:
+                # Fallback to basic feature extraction
+                features = {
+                    'length': len(pkt),
+                    'src_bytes': len(pkt),
+                    'packet_count': 1,
+                    'flow_duration': 0.1
+                }
         except Exception as e:
             print(f"\n[!] Error in extract_flow_features: {e}")
             return True
@@ -1258,10 +1152,11 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
         
         # Add packet to processing queue for advanced detection if available
         try:
-            if 'packet_processor' in globals() and packet_processor is not None:
+            if ENHANCED_DETECTION_AVAILABLE and packet_processor is not None:
                 packet_processor.add_packet(pkt, features)
         except Exception as e:
-            print(f"\n[!] Error in packet_processor: {e}")
+            if int(time.time()) % 10 == 0:  # Log occasionally
+                print(f"\n[!] Error in packet_processor: {e}")
             return True
         
         # Update performance stats safely
@@ -1282,9 +1177,9 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
                 else:
                     prediction_label = predict_with_pcap_model(features, pcap_model, pcap_encoder)
                     confidence = 1.0  # Default confidence for pcap model
-                
-                # Debug output for predictions
-                if performance_stats['total_packets'] % 10 == 0:  # Log every 10th packet
+
+                # Debug output for predictions (reduced frequency)
+                if performance_stats['total_packets'] % 50 == 0:  # Log every 50th packet
                     attack_name = get_attack_name(prediction_label)
                     print(f"\n[+] Model Prediction:")
                     print(f"    Label: {prediction_label}")
@@ -1304,8 +1199,6 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
                 # Check for common web traffic false positives
                 elif is_benign_traffic(prediction_label, sport, dport, 'TCP' if proto == 6 else 'UDP' if proto == 17 else str(proto)):
                     is_benign = True
-                    if performance_stats['total_packets'] % 10 == 0:  # Log occasionally
-                        print(f"    Traffic marked as benign based on port/protocol analysis")
                 
                 # Only alert on high-confidence attacks
                 if not is_benign and confidence > 0.7:  # 70% confidence threshold
@@ -1346,8 +1239,6 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
                 # If this doesn't look like PostgreSQL traffic, mark as benign
                 if dport != 5432 and not (3306 <= dport <= 3400):  # Common DB ports
                     is_benign = True
-                    if int(time.time()) % 50 == 0:  # Log occasionally
-                        print(f"\nℹ️  False PostgreSQL detection: {src_ip}:{sport} -> {dst_ip}:{dport}")
             
             if not is_benign:
                 # Get attack name
@@ -1363,8 +1254,6 @@ def packet_handler(pkt, use_cic_model=True, pcap_model=None, pcap_encoder=None):
                 
                 # Skip if confidence is below threshold
                 if confidence < confidence_threshold:
-                    if int(time.time()) % 10 == 0:  # Don't spam
-                        print(f"\n⚠️  Low confidence detection ({confidence*100:.1f}%): {attack_name} - {src_ip}:{sport} -> {dst_ip}:{dport}", end='\r')
                     return True
                 
                 # Set color based on confidence
