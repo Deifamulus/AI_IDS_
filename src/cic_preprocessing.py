@@ -1,365 +1,483 @@
 """
-CIC Dataset Preprocessing
-This module preprocesses CIC-IDS datasets to be compatible with the existing training pipeline
+CIC Dataset Preprocessing with Memory Optimization
+This module preprocesses CIC-IDS datasets with memory efficiency
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.feature_selection import VarianceThreshold
 import joblib
 import os
-from typing import Optional, List
-
+import gc
+from tqdm import tqdm
+from typing import Optional, List, Dict, Union
+import warnings
+import pyarrow.parquet as pq
+import json
+warnings.filterwarnings('ignore')
 
 class CICPreprocessor:
-    """
-    Preprocessor for CIC-IDS datasets
-    Handles feature selection, encoding, scaling, and compatibility with existing pipeline
-    """
-    
-    def __init__(self, artifacts_dir: str = "../artifacts"):
-        """
-        Initialize the preprocessor
-        
-        Args:
-            artifacts_dir: Directory to save preprocessing artifacts (scalers, encoders)
-        """
+    def __init__(self, artifacts_dir: str = "artifacts"):
+        """Initialize with memory-efficient settings"""
         self.artifacts_dir = artifacts_dir
         os.makedirs(artifacts_dir, exist_ok=True)
-        
-        self.scaler = None
-        self.label_encoder = None
+        self.scaler = MinMaxScaler()
+        self.label_encoder = LabelEncoder()
+        self.feature_selector = None
         self.selected_features = None
+        self.dtypes = self._get_optimized_dtypes()
         
-    def load_data(self, file_path: str) -> pd.DataFrame:
-        """Load preprocessed CIC data"""
-        print(f"Loading data from {file_path}...")
-        df = pd.read_csv(file_path)
-        print(f"Loaded {len(df)} rows with {len(df.columns)} columns")
+    def _get_optimized_dtypes(self) -> Dict[str, str]:
+        """Return optimized dtypes for memory efficiency"""
+        return {
+            'src_port': 'int32',
+            'dst_port': 'int32',
+            'protocol': 'int8',
+            'flow_duration': 'int32',
+            'tot_fwd_pkts': 'int32',
+            'tot_bwd_pkts': 'int32',
+            'totlen_fwd_pkts': 'float32',
+            'totlen_bwd_pkts': 'float32',
+            'fwd_pkt_len_max': 'float32',
+            'fwd_pkt_len_min': 'float32',
+            'fwd_pkt_len_mean': 'float32',
+            'fwd_pkt_len_std': 'float32',
+            'bwd_pkt_len_max': 'float32',
+            'bwd_pkt_len_min': 'float32',
+            'bwd_pkt_len_mean': 'float32',
+            'bwd_pkt_len_std': 'float32',
+            'flow_byts_s': 'float32',
+            'flow_pkts_s': 'float32',
+            'flow_iat_mean': 'float32',
+            'flow_iat_std': 'float32',
+            'flow_iat_max': 'float32',
+            'flow_iat_min': 'float32',
+            'fwd_iat_tot': 'float32',
+            'fwd_iat_mean': 'float32',
+            'fwd_iat_std': 'float32',
+            'fwd_iat_max': 'float32',
+            'fwd_iat_min': 'float32',
+            'bwd_iat_tot': 'float32',
+            'bwd_iat_mean': 'float32',
+            'bwd_iat_std': 'float32',
+            'bwd_iat_max': 'float32',
+            'bwd_iat_min': 'float32',
+            'fwd_psh_flags': 'int8',
+            'bwd_psh_flags': 'int8',
+            'fwd_urg_flags': 'int8',
+            'bwd_urg_flags': 'int8',
+            'fwd_header_len': 'int32',
+            'bwd_header_len': 'int32',
+            'fwd_pkts_s': 'float32',
+            'bwd_pkts_s': 'float32',
+            'pkt_len_min': 'float32',
+            'pkt_len_max': 'float32',
+            'pkt_len_mean': 'float32',
+            'pkt_len_std': 'float32',
+            'pkt_len_var': 'float32',
+            'fin_flag_cnt': 'int8',
+            'syn_flag_cnt': 'int8',
+            'rst_flag_cnt': 'int8',
+            'psh_flag_cnt': 'int8',
+            'ack_flag_cnt': 'int8',
+            'urg_flag_cnt': 'int8',
+            'cwe_flag_count': 'int8',
+            'ece_flag_cnt': 'int8',
+            'down_up_ratio': 'float32',
+            'pkt_size_avg': 'float32',
+            'fwd_seg_size_avg': 'float32',
+            'bwd_seg_size_avg': 'float32',
+            'fwd_byts_b_avg': 'float32',
+            'fwd_pkts_b_avg': 'float32',
+            'fwd_blk_rate_avg': 'float32',
+            'bwd_byts_b_avg': 'float32',
+            'bwd_pkts_b_avg': 'float32',
+            'bwd_blk_rate_avg': 'float32',
+            'subflow_fwd_pkts': 'int32',
+            'subflow_fwd_byts': 'int32',
+            'subflow_bwd_pkts': 'int32',
+            'subflow_bwd_byts': 'int32',
+            'init_fwd_win_byts': 'int32',
+            'init_bwd_win_byts': 'int32',
+            'fwd_act_data_pkts': 'int32',
+            'fwd_seg_size_min': 'float32',
+            'active_mean': 'float32',
+            'active_std': 'float32',
+            'active_max': 'float32',
+            'active_min': 'float32',
+            'idle_mean': 'float32',
+            'idle_std': 'float32',
+            'idle_max': 'float32',
+            'idle_min': 'float32',
+            'label': 'category'
+        }
+
+    def _optimize_memory(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Optimize DataFrame memory usage"""
+        for col, dtype in self.dtypes.items():
+            if col in df.columns:
+                try:
+                    df[col] = df[col].astype(dtype)
+                except (ValueError, TypeError):
+                    # Skip if conversion fails
+                    continue
         return df
-    
-    def remove_duplicates(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Remove duplicate rows"""
-        initial_len = len(df)
-        df = df.drop_duplicates()
-        removed = initial_len - len(df)
-        
-        if removed > 0:
-            print(f"Removed {removed} duplicate rows")
-        
-        return df
-    
-    def handle_infinite_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Replace infinite values with large finite numbers"""
-        print("Handling infinite values...")
-        
-        # Replace inf with NaN first
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        
-        # For each numeric column, replace NaN with column median
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        
-        for col in numeric_cols:
-            if df[col].isnull().any():
-                median_val = df[col].median()
-                df[col].fillna(median_val, inplace=True)
-        
-        return df
-    
-    def select_important_features(self, df: pd.DataFrame, 
-                                 method: str = "variance",
-                                 n_features: Optional[int] = None) -> pd.DataFrame:
-        """
-        Select important features from CIC dataset
-        
-        Args:
-            df: Input DataFrame
-            method: Feature selection method ('variance', 'correlation', 'all')
-            n_features: Number of features to select (None = auto)
-        
-        Returns:
-            DataFrame with selected features
-        """
-        print(f"\n--- Feature Selection (method: {method}) ---")
-        
-        # Separate features and labels
-        label_col = 'label'
-        if label_col not in df.columns:
-            raise ValueError("Label column not found")
-        
-        X = df.drop(columns=[label_col])
-        y = df[label_col]
-        
-        # Remove non-numeric columns
-        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-        X = X[numeric_cols]
-        
-        print(f"Starting with {len(X.columns)} numeric features")
-        
-        if method == "variance":
-            # Remove low variance features
-            variances = X.var()
-            threshold = variances.quantile(0.1)  # Remove bottom 10%
-            selected = variances[variances > threshold].index.tolist()
-            
-        elif method == "correlation":
-            # Remove highly correlated features
-            corr_matrix = X.corr().abs()
-            upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-            
-            # Find features with correlation > 0.95
-            to_drop = [column for column in upper.columns if any(upper[column] > 0.95)]
-            selected = [col for col in X.columns if col not in to_drop]
-            
-        elif method == "all":
-            selected = X.columns.tolist()
+
+    def _process_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
+        """Process a single chunk of data"""
+        # Handle missing values
+        chunk = chunk.replace([np.inf, -np.inf], np.nan)
+        chunk = chunk.fillna(chunk.median(numeric_only=True))
+        return chunk
+
+    def _read_file_in_chunks(self, filepath: str, columns: list = None, chunk_size: int = 100000):
+        """Read file in chunks, handling both CSV and Parquet formats."""
+        if filepath.endswith('.parquet'):
+            # For parquet files
+            parquet_file = pq.ParquetFile(filepath)
+            for batch in parquet_file.iter_batches(columns=columns, batch_size=chunk_size):
+                yield batch.to_pandas()
         else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        # Limit number of features if specified
-        if n_features and len(selected) > n_features:
-            # Select top N by variance
-            variances = X[selected].var().sort_values(ascending=False)
-            selected = variances.head(n_features).index.tolist()
-        
-        self.selected_features = selected
-        print(f"Selected {len(selected)} features")
-        
-        # Save selected features
-        features_path = os.path.join(self.artifacts_dir, "selected_features.txt")
-        with open(features_path, 'w') as f:
-            f.write('\n'.join(selected))
-        print(f"Selected features saved to {features_path}")
-        
-        # Return DataFrame with selected features + label
-        return pd.concat([X[selected], y], axis=1)
-    
-    def encode_categorical_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Encode categorical features (if any remain)
-        
-        Args:
-            df: Input DataFrame
-        
-        Returns:
-            DataFrame with encoded features
-        """
-        # Identify categorical columns (excluding label)
-        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-        
-        if 'label' in cat_cols:
-            cat_cols.remove('label')
-        
-        if cat_cols:
-            print(f"\nEncoding {len(cat_cols)} categorical features: {cat_cols}")
-            df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
-        
-        return df
-    
-    def scale_features(self, df: pd.DataFrame, fit: bool = True) -> pd.DataFrame:
-        """
-        Scale numeric features using MinMaxScaler
-        
-        Args:
-            df: Input DataFrame
-            fit: Whether to fit the scaler (True for training, False for test)
-        
-        Returns:
-            DataFrame with scaled features
-        """
-        print("\n--- Scaling Features ---")
-        
-        # Separate features and labels
-        X = df.drop(columns=['label'])
-        y = df['label']
-        
-        # Get numeric columns
-        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-        
-        if fit:
-            self.scaler = MinMaxScaler()
-            X[numeric_cols] = self.scaler.fit_transform(X[numeric_cols])
-            
-            # Save scaler
-            scaler_path = os.path.join(self.artifacts_dir, "cic_scaler.pkl")
-            joblib.dump(self.scaler, scaler_path)
-            print(f"Scaler saved to {scaler_path}")
-        else:
-            if self.scaler is None:
-                raise ValueError("Scaler not fitted. Set fit=True first.")
-            X[numeric_cols] = self.scaler.transform(X[numeric_cols])
-        
-        print(f"Scaled {len(numeric_cols)} numeric features")
-        
-        # Combine back with labels
-        return pd.concat([X, y], axis=1)
-    
-    def encode_labels(self, df: pd.DataFrame, fit: bool = True) -> pd.DataFrame:
-        """
-        Encode labels to numeric values
-        
-        Args:
-            df: Input DataFrame
-            fit: Whether to fit the encoder (True for training, False for test)
-        
-        Returns:
-            DataFrame with encoded labels
-        """
-        print("\n--- Encoding Labels ---")
-        
-        if fit:
-            self.label_encoder = LabelEncoder()
-            df['label'] = self.label_encoder.fit_transform(df['label'])
-            
-            # Save encoder
-            encoder_path = os.path.join(self.artifacts_dir, "cic_label_encoder.pkl")
-            joblib.dump(self.label_encoder, encoder_path)
-            print(f"Label encoder saved to {encoder_path}")
-            
-            # Print label mapping
-            print("\nLabel mapping:")
-            for i, label in enumerate(self.label_encoder.classes_):
-                print(f"  {label} -> {i}")
-        else:
-            if self.label_encoder is None:
-                raise ValueError("Label encoder not fitted. Set fit=True first.")
-            df['label'] = self.label_encoder.transform(df['label'])
-        
-        return df
-    
-    def balance_dataset(self, df: pd.DataFrame, method: str = "undersample", 
-                       max_samples_per_class: Optional[int] = None) -> pd.DataFrame:
-        """
-        Balance the dataset to handle class imbalance
-        
-        Args:
-            df: Input DataFrame
-            method: Balancing method ('undersample', 'none')
-            max_samples_per_class: Maximum samples per class
-        
-        Returns:
-            Balanced DataFrame
-        """
-        print("\n--- Balancing Dataset ---")
-        
-        label_counts = df['label'].value_counts()
-        print("Class distribution before balancing:")
-        print(label_counts)
-        
-        if method == "undersample":
-            # Undersample majority classes
-            if max_samples_per_class is None:
-                max_samples_per_class = label_counts.min()
-            
-            balanced_dfs = []
-            for label in df['label'].unique():
-                label_df = df[df['label'] == label]
-                if len(label_df) > max_samples_per_class:
-                    label_df = label_df.sample(n=max_samples_per_class, random_state=42)
-                balanced_dfs.append(label_df)
-            
-            df = pd.concat(balanced_dfs, ignore_index=True)
-            df = df.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle
-            
-            print("\nClass distribution after balancing:")
-            print(df['label'].value_counts())
-        
-        return df
-    
+            # For CSV files
+            for chunk in pd.read_csv(filepath, chunksize=chunk_size, usecols=columns, low_memory=False):
+                yield chunk
+
     def preprocess_pipeline(self, input_path: str, output_path: str,
                           feature_selection: str = "variance",
                           n_features: Optional[int] = None,
                           balance: bool = False,
-                          max_samples_per_class: Optional[int] = None) -> pd.DataFrame:
-        """
-        Complete preprocessing pipeline for CIC dataset
+                          max_samples: int = 50000,
+                          chunk_size: int = 100000) -> None:
+        """Memory-efficient preprocessing pipeline with improved label handling"""
+        print("Starting memory-efficient preprocessing...")
+        print(f"Input file: {input_path}")
+        print(f"Output file: {output_path}")
         
-        Args:
-            input_path: Path to input CSV file
-            output_path: Path to save processed data
-            feature_selection: Feature selection method
-            n_features: Number of features to select
-            balance: Whether to balance the dataset
-            max_samples_per_class: Max samples per class for balancing
-        
-        Returns:
-            Processed DataFrame
-        """
-        print("=" * 60)
-        print("CIC DATASET PREPROCESSING PIPELINE")
-        print("=" * 60)
-        
-        # Load data
-        df = self.load_data(input_path)
-        
-        # Remove duplicates
-        df = self.remove_duplicates(df)
-        
-        # Handle infinite values
-        df = self.handle_infinite_values(df)
-        
-        # Select features
-        df = self.select_important_features(df, method=feature_selection, n_features=n_features)
-        
-        # Encode categorical features
-        df = self.encode_categorical_features(df)
-        
-        # Balance dataset (before scaling)
-        if balance:
-            df = self.balance_dataset(df, method="undersample", 
-                                     max_samples_per_class=max_samples_per_class)
-        
-        # Scale features
-        df = self.scale_features(df, fit=True)
-        
-        # Encode labels (do this last to keep readable labels during balancing)
-        df = self.encode_labels(df, fit=True)
-        
-        # Save processed data
+        # Create output directory if it doesn't exist
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        df.to_csv(output_path, index=False)
-        print(f"\n{'=' * 60}")
-        print(f"Processed data saved to: {output_path}")
-        print(f"Final shape: {df.shape}")
-        print(f"{'=' * 60}")
         
-        return df
+        # First, analyze the input data
+        print("\nAnalyzing input data...")
+        
+        # Get all unique labels and their counts
+        print("Counting unique labels in the dataset...")
+        label_column = 'Label' if input_path.endswith('.parquet') else 'label'
+        
+        # Get label distribution
+        label_counts = {}
+        for chunk in self._read_file_in_chunks(input_path, columns=[label_column], chunk_size=chunk_size):
+            chunk_counts = chunk[label_column].value_counts().to_dict()
+            for k, v in chunk_counts.items():
+                label_counts[k] = label_counts.get(k, 0) + v
+        
+        if not label_counts:
+            raise ValueError("No data found in the input file")
+            
+        print("\nOriginal label distribution:")
+        for label, count in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"{label}: {count:,} samples")
+        
+        # Process data in chunks
+        print("\nProcessing data in chunks...")
+        
+        # First pass: Fit label encoder and feature selector if needed
+        if not hasattr(self, 'label_encoder_fitted_'):
+            print("\nFitting label encoder...")
+            self.label_encoder.fit(list(label_counts.keys()))
+            self.label_encoder_fitted_ = True
+            
+            # Save the label encoder
+            os.makedirs(self.artifacts_dir, exist_ok=True)
+            joblib.dump(
+                self.label_encoder, 
+                os.path.join(self.artifacts_dir, 'label_encoder.joblib')
+            )
+            print(f"Label encoder saved to {os.path.join(self.artifacts_dir, 'label_encoder.joblib')}")
+        
+        # Process data in chunks
+        total_chunks = sum(1 for _ in self._read_file_in_chunks(input_path, chunk_size=chunk_size))
+        first_chunk = True
+        
+        for chunk_idx, chunk in enumerate(tqdm(self._read_file_in_chunks(input_path, chunk_size=chunk_size), 
+                                         total=total_chunks,
+                                         desc="Processing data")):
+            # Optimize memory usage
+            chunk = self._optimize_memory(chunk)
+            
+            # Process the chunk
+            processed_chunk = self._process_chunk(chunk)
+            
+            # Make a copy of the chunk to avoid SettingWithCopyWarning
+            chunk_copy = processed_chunk.copy()
+            
+            # Transform labels
+            try:
+                y = self.label_encoder.transform(chunk_copy[label_column].astype(str).str.strip())
+            except (KeyError, ValueError) as e:
+                print(f"Error transforming labels: {e}")
+                print("Refitting label encoder with new labels...")
+                
+                # Get all unique labels from the dataset including new ones
+                all_labels = set()
+                for label_chunk in self._read_file_in_chunks(input_path, columns=[label_column], chunk_size=100000):
+                    all_labels.update(label_chunk[label_column].astype(str).str.strip().unique())
+                
+                # Add any existing classes from the label encoder
+                if hasattr(self, 'label_encoder_fitted_'):
+                    all_labels.update(self.label_encoder.classes_)
+                
+                # Reinitialize and fit the label encoder with all labels
+                self.label_encoder = LabelEncoder()
+                self.label_encoder.fit(list(all_labels))
+                self.label_encoder_fitted_ = True
+                
+                # Save the updated encoder
+                joblib.dump(
+                    self.label_encoder,
+                    os.path.join(self.artifacts_dir, 'label_encoder.joblib')
+                )
+                
+                # Try transforming again
+                y = self.label_encoder.transform(chunk_copy[label_column].astype(str).str.strip())
+            
+            # Drop label column before feature processing
+            X = chunk_copy.drop(columns=[label_column])
+            
+            # Convert all columns to numeric, coercing errors to NaN
+            for col in X.columns:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+            
+            # Fill any NaN values that resulted from conversion with 0
+            X = X.fillna(0)
+            
+            # Feature selection
+            if feature_selection == "variance" and n_features:
+                if not hasattr(self, 'feature_selector_fitted_'):
+                    print("\nPerforming feature selection...")
+                    selector = VarianceThreshold(threshold=0.1)
+                    X = selector.fit_transform(X)
+                    self.feature_selector = selector
+                    joblib.dump(
+                        selector,
+                        os.path.join(self.artifacts_dir, 'feature_selector.joblib')
+                    )
+                    self.feature_selector_fitted_ = True
+                    print(f"Selected {X.shape[1]} features")
+                else:
+                    X = self.feature_selector.transform(X)
+            
+            # Scale features
+            if not hasattr(self, 'scaler_fitted_'):
+                print("\nFitting scaler...")
+                X = self.scaler.fit_transform(X)
+                joblib.dump(
+                    self.scaler,
+                    os.path.join(self.artifacts_dir, 'scaler.joblib')
+                )
+                self.scaler_fitted_ = True
+            else:
+                X = self.scaler.transform(X)
+            
+            # Store original feature names if this is the first chunk
+            if first_chunk and not hasattr(self, 'feature_names_'):
+                self.feature_names_ = chunk_copy.drop(columns=[label_column]).columns.tolist()
+                
+                # Save feature names to a JSON file
+                feature_names_path = os.path.splitext(output_path)[0] + '_feature_names.json'
+                with open(feature_names_path, 'w') as f:
+                    json.dump({
+                        'original_features': self.feature_names_,
+                        'processed_features': [f'feature_{i}' for i in range(X.shape[1])]
+                    }, f, indent=2)
+                print(f"\nSaved feature names to {feature_names_path}")
+            
+            # Convert back to DataFrame and add labels
+            processed_chunk = pd.DataFrame(
+                X,
+                columns=[f'feature_{i}' for i in range(X.shape[1])]
+            )
+            processed_chunk['label'] = y
+            
+            # Save chunk to disk
+            processed_chunk.to_csv(
+                output_path,
+                mode='a',
+                header=not os.path.exists(output_path) or first_chunk,
+                index=False
+            )
+            first_chunk = False
+            
+            # Print progress
+            if (chunk_idx + 1) % 10 == 0:
+                print(f"Processed {(chunk_idx + 1) * chunk_size} samples...")
+            
+            del processed_chunk
+            gc.collect()
+        
+        print(f"\nPreprocessing complete. Results saved to {output_path}")
+        
+        # Balance the dataset if requested
+        if balance:
+            print("\nBalancing dataset...")
+            temp_path = f"{output_path}.temp"
+            os.rename(output_path, temp_path)
+            self.balance_dataset(temp_path, output_path, max_samples)
+            os.remove(temp_path)
+        
+        # Print final label distribution
+        print("\nFinal label distribution in preprocessed data:")
+        final_label_counts = {}
+        for chunk in pd.read_csv(output_path, chunksize=chunk_size, usecols=['label']):
+            for label, count in chunk['label'].value_counts().items():
+                final_label_counts[label] = final_label_counts.get(label, 0) + count
+        
+        for label, count in sorted(final_label_counts.items()):
+            print(f"Class {label}: {count} samples")
 
+    def balance_dataset(self, input_path: str, output_path: str, 
+                       max_samples: int = 50000) -> None:
+        """Balance dataset by undersampling majority classes"""
+        print("Balancing dataset...")
+        
+        # Load the label encoder if it exists
+        label_encoder_path = os.path.join(self.artifacts_dir, 'label_encoder.joblib')
+        if os.path.exists(label_encoder_path):
+            self.label_encoder = joblib.load(label_encoder_path)
+        else:
+            raise FileNotFoundError(f"Label encoder not found at {label_encoder_path}. Please run preprocessing first.")
+        
+        # Get all class names from the label encoder
+        class_names = self.label_encoder.classes_
+        print(f"Found {len(class_names)} classes in label encoder")
+        
+        # First pass: get class counts
+        class_counts = {}
+        for chunk in pd.read_csv(input_path, chunksize=100000, usecols=['label']):
+            # Convert numeric labels back to original class names for counting
+            chunk_labels = self.label_encoder.inverse_transform(chunk['label'].astype(int))
+            for label, count in pd.Series(chunk_labels).value_counts().items():
+                class_counts[label] = class_counts.get(label, 0) + count
+        
+        print(f"Original class distribution: {class_counts}")
+        
+        # Calculate samples per class (convert class names to encoded values)
+        samples_per_class = {}
+        for class_name, count in class_counts.items():
+            encoded_label = self.label_encoder.transform([class_name])[0]
+            samples_per_class[encoded_label] = min(count, max_samples)
+        
+        # Second pass: sample from each class
+        first_chunk = True
+        
+        # Create a new CSV file (overwrite if exists)
+        open(output_path, 'w').close()
+        
+        for encoded_label, n_samples in samples_per_class.items():
+            # Get the original class name for logging
+            class_name = self.label_encoder.inverse_transform([encoded_label])[0]
+            print(f"\nProcessing class: {class_name} (encoded: {encoded_label}), target samples: {n_samples}")
+            
+            # Read and filter chunks for the current class
+            label_chunks = []
+            total_samples = 0
+            
+            for chunk in pd.read_csv(input_path, chunksize=100000, low_memory=False):
+                # Filter rows where label matches the current encoded label
+                chunk = chunk[chunk['label'].astype(int) == encoded_label].copy()
+                
+                if not chunk.empty:
+                    # Calculate how many samples we can take from this chunk
+                    remaining = n_samples - total_samples
+                    if remaining <= 0:
+                        break
+                        
+                    sample_size = min(remaining, len(chunk))
+                    sampled_chunk = chunk.sample(n=sample_size, random_state=42)
+                    label_chunks.append(sampled_chunk)
+                    total_samples += len(sampled_chunk)
+                    
+                    if total_samples >= n_samples:
+                        break
+            
+            if label_chunks:
+                balanced_chunk = pd.concat(label_chunks)
+                
+                # Ensure the label column is properly encoded as integer
+                balanced_chunk['label'] = balanced_chunk['label'].astype(int)
+                
+                # Save the chunk
+                balanced_chunk.to_csv(
+                    output_path,
+                    mode='a',
+                    header=first_chunk,
+                    index=False
+                )
+                first_chunk = False
+                
+                print(f"Added {len(balanced_chunk)} samples for class {class_name} (encoded: {encoded_label})")
+                
+                # Clean up
+                del balanced_chunk
+                gc.collect()
+        
+        # Verify the balanced dataset
+        print("\nVerifying balanced dataset...")
+        balanced_counts = {}
+        for chunk in pd.read_csv(output_path, chunksize=100000, usecols=['label']):
+            # Convert numeric labels back to original class names for reporting
+            chunk_labels = self.label_encoder.inverse_transform(chunk['label'].astype(int))
+            for label, count in pd.Series(chunk_labels).value_counts().items():
+                balanced_counts[label] = balanced_counts.get(label, 0) + count
+        
+        print("\nFinal class distribution:")
+        for class_name, count in sorted(balanced_counts.items()):
+            print(f"  {class_name}: {count} samples")
+            
+        print(f"\nTotal samples in balanced dataset: {sum(balanced_counts.values())}")
+        print(f"Balanced dataset saved to {output_path}")
 
 def main():
-    """Example usage"""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Preprocess CIC-IDS dataset for training")
-    parser.add_argument("--input", type=str, required=True, help="Input CSV file (from cic_dataset_loader)")
-    parser.add_argument("--output", type=str, default="../data/processed/cic_preprocessed.csv", 
-                       help="Output file path")
-    parser.add_argument("--artifacts-dir", type=str, default="../artifacts", 
-                       help="Directory to save artifacts")
-    parser.add_argument("--feature-selection", type=str, default="variance",
-                       choices=["variance", "correlation", "all"],
-                       help="Feature selection method")
-    parser.add_argument("--n-features", type=int, help="Number of features to select")
-    parser.add_argument("--balance", action="store_true", help="Balance the dataset")
-    parser.add_argument("--max-samples", type=int, help="Max samples per class for balancing")
+    parser = argparse.ArgumentParser(description='Memory-efficient CIC dataset preprocessing')
+    parser.add_argument('--input', type=str, required=True, help='Input CSV file path')
+    parser.add_argument('--output', type=str, required=True, help='Output CSV file path')
+    parser.add_argument('--feature-selection', type=str, default='variance',
+                       choices=['variance', 'all'], help='Feature selection method')
+    parser.add_argument('--n-features', type=int, default=None, 
+                       help='Number of features to select')
+    parser.add_argument('--balance', action='store_true', help='Balance the dataset')
+    parser.add_argument('--max-samples', type=int, default=50000,
+                       help='Maximum samples per class for balancing')
+    parser.add_argument('--chunk-size', type=int, default=100000,
+                       help='Number of rows to process at a time')
     
     args = parser.parse_args()
     
-    # Create preprocessor
-    preprocessor = CICPreprocessor(artifacts_dir=args.artifacts_dir)
+    preprocessor = CICPreprocessor()
     
-    # Run preprocessing pipeline
+    # Preprocess data
+    temp_path = f"{args.output}.temp"
     preprocessor.preprocess_pipeline(
         input_path=args.input,
-        output_path=args.output,
+        output_path=temp_path,
         feature_selection=args.feature_selection,
         n_features=args.n_features,
-        balance=args.balance,
-        max_samples_per_class=args.max_samples
+        chunk_size=args.chunk_size
     )
     
-    print("\n✓ Preprocessing complete!")
-
+    # Balance if requested
+    if args.balance:
+        preprocessor.balance_dataset(
+            input_path=temp_path,
+            output_path=args.output,
+            max_samples=args.max_samples
+        )
+        os.remove(temp_path)  # Clean up temporary file
+    else:
+        os.rename(temp_path, args.output)
 
 if __name__ == "__main__":
     main()
+
+    
