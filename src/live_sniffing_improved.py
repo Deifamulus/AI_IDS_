@@ -1,63 +1,57 @@
 
 #!/usr/bin/env python3
 """
-live_sniffing_improved_fusion.py
-Integrated version of live_sniffing_improved.py with:
- - Proper SuricataManager running Suricata in daemon mode (-D)
- - EVE JSON monitoring thread
- - Hybrid ML + Suricata fusion logic (Option 4)
- - Keeps existing model loading/prediction pipeline
+Suricata-based Network IDS
+A lightweight network intrusion detection system using Suricata for traffic analysis.
 """
 
 import os
 import sys
 import time
-import joblib
-import pandas as pd
-import numpy as np
 import logging
 import argparse
-import warnings
 import threading
 import ipaddress
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any, Callable, Set, Union
+from typing import Dict, List, Optional, Any, Callable, Deque
 from pathlib import Path
 import subprocess
 import json
 from collections import deque
 from dataclasses import dataclass
+import requests
+import socketio as socketio_client
 
 import scapy.all as scapy
+
+# Dashboard settings
+DASHBOARD_URL = "http://localhost:5000/update"
 
 # -------------------------
 # Configuration & Constants
 # -------------------------
-DEFAULT_INTERFACE = "eth0"
-LOG_FILENAME = "ids_improved.log"
-DEFAULT_MODEL_PATH = str(Path(__file__).parent.parent / "models" / "xgboost_model_cic.pkl")
+DEFAULT_INTERFACE = "lo"
+LOG_FILENAME = "suricata_ids.log"
 DEFAULT_RULES_DIR = "/var/lib/suricata/rules"
 EVE_JSON_PATH = "/var/log/suricata/eve.json"
 
-# Fusion parameters
-SURICATA_ALERT_WINDOW = 30       # seconds to consider a recent suricata alert relevant
-ML_CONFIDENCE_HIGH = 0.85       # ML high confidence threshold
-ML_CONFIDENCE_MED = 0.7         # ML medium confidence threshold
+# Alert parameters
+SURICATA_ALERT_WINDOW = 30  # seconds to consider a recent suricata alert relevant
 
 # Whitelists and false-positive suppression (minimal defaults)
 WHITELISTED_PORTS = {80, 443, 53, 123}
+# Only whitelist localhost by default
 WHITELISTED_IP_RANGES = {
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "10.0.0.0/8",
+    "127.0.0.1/32",
+    "::1/128"  # IPv6 localhost
 }
 
 # -------------------------
 # Utilities
 # -------------------------
-def setup_logging(debug: bool = False) -> logging.Logger:
+def setup_logging(debug: bool = True) -> logging.Logger:  # Changed default to True
     logger = logging.getLogger("nids_improved_fusion")
-    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    logger.setLevel(logging.DEBUG)  # Always set to DEBUG
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     # Clear existing handlers
     if logger.handlers:
@@ -66,7 +60,7 @@ def setup_logging(debug: bool = False) -> logging.Logger:
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG if debug else logging.INFO)
+    ch.setLevel(logging.DEBUG)  # Always set to DEBUG
     ch.setFormatter(formatter)
     logger.addHandler(fh)
     logger.addHandler(ch)
@@ -156,9 +150,11 @@ class SuricataManager:
             return False
 
     def _monitor_eve(self):
-        """Tail the EVE JSON file and forward alert objects to callback"""
+        
+        TEST_MODE = True  # 🔁 Set to False once dashboard reflects real alerts properly
         logger.info(f"Monitoring EVE JSON at {self.eve_path}")
-        # wait for file to exist
+        
+        # Wait for eve.json to exist
         attempts = 0
         while self.running and not os.path.exists(self.eve_path) and attempts < 60:
             attempts += 1
@@ -170,26 +166,47 @@ class SuricataManager:
 
         try:
             with open(self.eve_path, "r") as fh:
-                # go to end initially
+                # Go to end initially
                 fh.seek(0, os.SEEK_END)
                 while self.running:
                     line = fh.readline()
                     if not line:
                         time.sleep(0.2)
                         continue
+
                     try:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    # Only forward alerts (eve can contain many event types)
+
+                    event_type = data.get("event_type", "")
+                    flow_data = data.get("flow", {})
+
+                    # 🧠 Case 1: Normal Suricata alerts
                     if "alert" in data:
                         if self.alert_callback:
-                            try:
-                                self.alert_callback(data)
-                            except Exception:
-                                logger.exception("Alert callback raised an exception")
+                            self.alert_callback(data)
+                            logger.debug("Forwarded real Suricata alert to callback.")
+                    
+                    # 🧠 Case 2: Promote flow entries to synthetic alerts
+                    elif event_type == "flow":
+                        # Either Suricata says alerted=True, or TEST_MODE is on
+                        if flow_data.get("alerted", False) or TEST_MODE:
+                            synthetic_alert = {
+                                "src_ip": data.get("src_ip"),
+                                "dest_ip": data.get("dest_ip"),
+                                "alert": {
+                                    "signature": f"Flow Event {data.get('src_ip')}->{data.get('dest_ip')}",
+                                    "severity": 5 if not flow_data.get("alerted", False) else 3,
+                                    "signature_id": 999999
+                                }
+                            }
+                            if self.alert_callback:
+                                self.alert_callback(synthetic_alert)
+                                logger.debug(f"Synthetic flow alert generated: {synthetic_alert['alert']['signature']}")
         except Exception as e:
             logger.exception(f"EVE monitor error: {e}")
+
 
     def stop(self):
         """Stop Suricata process (attempt graceful stop)"""
@@ -206,107 +223,61 @@ class SuricataManager:
             self.running = False
 
 # -------------------------
-# Model loading / prediction helpers
 # -------------------------
-model = None
-scaler = None
-selected_features = []
-
-def load_model(model_path: str, scaler_path: Optional[str] = None) -> bool:
-    global model, scaler, selected_features
-    if not os.path.exists(model_path):
-        logger.error(f"Model file not found: {model_path}")
-        return False
-    try:
-        model_data = joblib.load(model_path)
-        if isinstance(model_data, dict):
-            model = model_data.get("model", None)
-            selected_features = model_data.get("feature_names", [])
-        else:
-            model = model_data
-            selected_features = []
-        if scaler_path and os.path.exists(scaler_path):
-            scaler = joblib.load(scaler_path)
-        logger.info(f"Model loaded: {getattr(model, '__class__', 'unknown')}")
-        return True
-    except Exception as e:
-        logger.exception(f"Failed to load model: {e}")
-        return False
-
-def preprocess_features(packet_features: Dict[str, Any]) -> Optional[pd.DataFrame]:
-    """Prepare feature DataFrame for model prediction"""
-    if packet_features is None:
-        return None
-    try:
-        df = pd.DataFrame([packet_features])
-        expected = getattr(model, "feature_names_in_", None)
-        if expected is None and selected_features:
-            expected = selected_features
-        if expected is not None and len(expected) > 0:
-            missing = set(expected) - set(df.columns)
-            for m in missing:
-                df[m] = 0
-            df = df[list(expected)]
-        if scaler is not None:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                X = scaler.transform(df)
-                df = pd.DataFrame(X, columns=df.columns)
-        return df
-    except Exception:
-        logger.exception("Error preprocessing features")
-        return None
-
-def predict_label_and_confidence(packet_features: Dict[str, Any]) -> Tuple[str, float]:
-    """Return label (string) and confidence (0-1)"""
-    if model is None:
-        return "model_not_loaded", 0.0
-    df = preprocess_features(packet_features)
-    if df is None or df.empty:
-        return "error", 0.0
-    if not hasattr(model, "predict_proba"):
-        pred = model.predict(df)[0]
-        return str(pred), 1.0
-    probs = model.predict_proba(df)[0]
-    idx = int(np.argmax(probs))
-    label = str(model.classes_[idx]) if hasattr(model, "classes_") else str(idx)
-    confidence = float(probs[idx])
-    return label, confidence
-
-# -------------------------
-# Network IDS with fusion
+# Network IDS
 # -------------------------
 class NetworkIDS:
-    def __init__(self, interface: str = DEFAULT_INTERFACE, rules_dir: str = DEFAULT_RULES_DIR,
-                 use_suricata: bool = True):
+    """Network Intrusion Detection System using Suricata for traffic analysis."""
+    
+    def __init__(self, interface: str = DEFAULT_INTERFACE, 
+                 rules_dir: str = DEFAULT_RULES_DIR):
+        """Initialize the Network IDS with Suricata integration.
+        
+        Args:
+            interface: Network interface to monitor (e.g., 'eth0', 'lo')
+            rules_dir: Directory containing Suricata rules
+        """
         self.interface = interface
         self.rules_dir = rules_dir
-        self.use_suricata = use_suricata
         self.suricata = None
-        # deque for recent SuricataAlert objects
-        self.recent_suricata_alerts = deque()
+        
+        # Deque for recent SuricataAlert objects
+        self.recent_suricata_alerts: Deque[SuricataAlert] = deque()
         self.alert_lock = threading.Lock()
         self.suricata_alert_window = SURICATA_ALERT_WINDOW
 
-        # Stats
+        # Statistics
         self.packet_count = 0
-        self.attack_count = 0
+        self.alert_count = 0
         self.start_time = time.time()
 
-        # Initialize Suricata if requested
-        if self.use_suricata:
-            self.suricata = SuricataManager(interface=self.interface, rules_dir=self.rules_dir)
-            # set callback
+        # Initialize Suricata
+        logger.info(f"Initializing Suricata on interface {interface}")
+        logger.info(f"Using rules from: {rules_dir}")
+        
+        try:
+            self.suricata = SuricataManager(
+                interface=self.interface, 
+                rules_dir=self.rules_dir
+            )
             self.suricata.set_alert_callback(self._suricata_callback)
-            started = self.suricata.start()
-            if not started:
-                logger.warning("Suricata could not be started; continuing without Suricata alerts.")
-                self.use_suricata = False
+            
+            if not self.suricata.start():
+                logger.error("Failed to start Suricata. Exiting...")
+                sys.exit(1)
+                
+            logger.info("Suricata started successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Suricata: {e}")
+            sys.exit(1)
 
     # Suricata callback expects raw eve JSON dict
     def _suricata_callback(self, eve_obj: dict):
         try:
-            # Map fields that may be in different locations depending on event format
+            # log raw eve object for debugging (comment out later)
+            logger.debug(f"EVE raw event: {json.dumps(eve_obj)}")
+
             src_ip = eve_obj.get("src_ip") or eve_obj.get("src")
             dest_ip = eve_obj.get("dest_ip") or eve_obj.get("dest")
             signature = eve_obj.get("alert", {}).get("signature") or eve_obj.get("sig")
@@ -322,11 +293,11 @@ class NetworkIDS:
             )
             with self.alert_lock:
                 self.recent_suricata_alerts.append(alert)
-                # prune old alerts
                 self._prune_alerts()
             logger.debug(f"Suricata alert recorded: {alert.signature} {alert.src_ip}->{alert.dest_ip}")
         except Exception:
             logger.exception("Error in suricata callback")
+
 
     def _prune_alerts(self):
         now = time.time()
@@ -334,13 +305,26 @@ class NetworkIDS:
             self.recent_suricata_alerts.popleft()
 
     def _find_matching_suricata(self, src_ip: str, dst_ip: str) -> Optional[SuricataAlert]:
-        """Return a recent SuricataAlert matching src/dst (or None)"""
+        """Return a recent SuricataAlert matching src/dst in either direction or by single IP."""
         with self.alert_lock:
             self._prune_alerts()
+            # Most strict: exact match (src->dst)
             for alert in reversed(self.recent_suricata_alerts):
                 if alert.src_ip == src_ip and alert.dest_ip == dst_ip:
+                    logger.debug("Matched suricata alert (exact src->dst)")
+                    return alert
+            # Try reversed direction (dst->src)
+            for alert in reversed(self.recent_suricata_alerts):
+                if alert.src_ip == dst_ip and alert.dest_ip == src_ip:
+                    logger.debug("Matched suricata alert (reversed dst->src)")
+                    return alert
+            # Fallback: match either src or dst alone (less precise)
+            for alert in reversed(self.recent_suricata_alerts):
+                if alert.src_ip == src_ip or alert.dest_ip == dst_ip or alert.src_ip == dst_ip or alert.dest_ip == src_ip:
+                    logger.debug("Matched suricata alert (loose match by single IP)")
                     return alert
         return None
+
 
     def _is_whitelisted_ip(self, ip_str: str) -> bool:
         try:
@@ -352,33 +336,51 @@ class NetworkIDS:
                 return True
         return False
 
+    def _send_to_dashboard(self, packet_info):
+        """Send both alerts and normal packets to the Flask dashboard via HTTP POST."""
+        def send_request():
+            try:
+                # Always send to /update, dashboard auto-detects alerts
+                response = requests.post(DASHBOARD_URL, json=packet_info, timeout=5)
+                if response.status_code != 200:
+                    logger.warning(f"Dashboard returned {response.status_code}: {response.text}")
+                else:
+                    logger.debug(f"Packet (alert={packet_info.get('is_alert')}) sent to dashboard successfully.")
+            except Exception as e:
+                logger.error(f"Error sending packet to dashboard: {e}")
+
+        threading.Thread(target=send_request, daemon=True).start()
+        
+
+
     def process_packet(self, pkt: scapy.packet.Packet):
         """
-        Core processing per packet: extract features, get ML prediction,
-        check Suricata cache, then fuse decisions.
+        Process packet through Suricata for detection and forward to dashboard
         """
         logger.debug(f"Packet received: {pkt.summary()}")
         self.packet_count += 1
 
-        # basic extraction: best-effort
         try:
-            # IPv4 or IPv6
+            # Extract basic packet information
             if pkt.haslayer("IP"):
                 ip_layer = pkt["IP"]
                 src = ip_layer.src
                 dst = ip_layer.dst
                 proto = ip_layer.proto
+                proto_name = {6: 'TCP', 17: 'UDP', 1: 'ICMP'}.get(proto, f'Proto-{proto}')
             elif pkt.haslayer("IPv6"):
                 ip_layer = pkt["IPv6"]
                 src = ip_layer.src
                 dst = ip_layer.dst
                 proto = ip_layer.nh if hasattr(ip_layer, "nh") else 0
+                proto_name = {6: 'TCPv6', 17: 'UDPv6', 58: 'ICMPv6'}.get(proto, f'Proto-{proto}')
             else:
-                # not IP packet
+                # Not an IP packet, skip
                 return
 
-            sport = None
-            dport = None
+            # Extract ports if available
+            sport = 0
+            dport = 0
             if pkt.haslayer("TCP"):
                 sport = int(pkt["TCP"].sport)
                 dport = int(pkt["TCP"].dport)
@@ -386,47 +388,63 @@ class NetworkIDS:
                 sport = int(pkt["UDP"].sport)
                 dport = int(pkt["UDP"].dport)
 
-            # quick whitelist checks
-            if dport in WHITELISTED_PORTS or self._is_whitelisted_ip(src) or self._is_whitelisted_ip(dst):
+            # Check for Suricata alerts
+            is_alert = False
+            alert_info = {}
+            
+            suricata_alert = self._find_matching_suricata(src, dst)
+            if suricata_alert:
+                is_alert = True
+                alert_info = {
+                    'is_alert': True,
+                    'signature': suricata_alert.signature,
+                    'severity': suricata_alert.severity,
+                    'category': 'suricata_alert'
+                }
+                self.alert_count += 1
+            
+            # Prepare packet info for dashboard
+            packet_info = {
+                'src_ip': src or '0.0.0.0',
+                'src_port': sport or 0,
+                'dst_ip': dst or '0.0.0.0',  # Changed from dest_ip to dst_ip
+                'dst_port': dport or 0,      # Changed from dest_port to dst_port
+                'protocol': proto_name,
+                'length': len(pkt),
+                'timestamp': datetime.now().isoformat(),
+                'is_alert': is_alert,
+            }
+            
+            # Add alert details if this is an alert
+            if is_alert and alert_info:
+                packet_info.update({
+                    'signature': alert_info.get('signature', 'Unknown alert'),
+                    'severity': alert_info.get('severity', 3),  # Default to medium severity
+                    'category': alert_info.get('category', 'suricata_alert')
+                })
+                
+                # Log alerts at info level
+                log_msg = (f"🚨 SURICATA ALERT: {proto_name} {src}:{sport} -> {dst}:{dport} "
+                         f"- {packet_info.get('signature', '')}")
+                logger.info(log_msg)
+            else:
+                # Log normal traffic at debug level
+                logger.debug(f"{proto_name} {src}:{sport} -> {dst}:{dport} len={len(pkt)}")
+            
+            # Send to dashboard
+            self._send_to_dashboard(packet_info)
+            
+            # Skip further processing for whitelisted traffic
+            if (dport in WHITELISTED_PORTS or 
+                self._is_whitelisted_ip(src) or 
+                self._is_whitelisted_ip(dst)):
                 logger.debug(f"Whitelisted traffic: {src}->{dst} ports {sport}->{dport}")
                 return
 
-            # assemble feature dict - adapt to your feature extractor
-            features = {
-                "src_ip": src,
-                "dst_ip": dst,
-                "src_port": int(sport) if sport is not None else 0,
-                "dst_port": int(dport) if dport is not None else 0,
-                "protocol_num": int(proto) if proto is not None else 0,
-                "length": len(bytes(pkt)) if hasattr(pkt, "build") or hasattr(pkt, "original") else 0,
-            }
-
-            # ML prediction
-            label, confidence = predict_label_and_confidence(features)
-
-            # Check Suricata recent alerts
-            suricata_alert = None
-            if self.use_suricata:
-                suricata_alert = self._find_matching_suricata(src, dst)
-
-            # Fusion logic
-            if suricata_alert and confidence >= ML_CONFIDENCE_MED:
-                # Confirmed attack (both signals)
-                logger.warning(f"🚨 CONFIRMED ATTACK: {suricata_alert.signature} {src}->{dst} (ML_conf={confidence:.2f})")
-                self.attack_count += 1
-            elif suricata_alert:
-                # Suricata-only (log but do not treat as fully confirmed)
-                logger.info(f"⚠️ Suricata alert only: {suricata_alert.signature} {src}->{dst} (ML_conf={confidence:.2f})")
-            elif confidence >= ML_CONFIDENCE_HIGH:
-                # ML-only high confidence
-                logger.warning(f"🤖 ML-only anomaly: label={label} conf={confidence:.2f} {src}->{dst}")
-                self.attack_count += 1
-            else:
-                # benign or low-confidence ML
-                logger.debug(f"Normal/low-confidence: label={label} conf={confidence:.2f} {src}->{dst}")
-
-        except Exception:
-            logger.exception("Error processing packet")
+        except Exception as e:
+            logger.error(f"Error processing packet: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Packet that caused error: {pkt.summary()}")
 
     def stop(self):
         if self.suricata:
@@ -459,55 +477,57 @@ def start_sniffing(interface: str = DEFAULT_INTERFACE, count: int = 0):
 ids_global = None
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--interface", default=DEFAULT_INTERFACE)
-    parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
-    parser.add_argument("--scaler", default=None)
-    parser.add_argument("--rules-dir", default=DEFAULT_RULES_DIR)
-    parser.add_argument("--no-suricata", action="store_true")
-    parser.add_argument("-c", "--count", type=int, default=0)
-    parser.add_argument("-d", "--debug", action="store_true")
+    parser = argparse.ArgumentParser(description="Network IDS with Suricata")
+    parser.add_argument("-i", "--interface", default=DEFAULT_INTERFACE,
+                      help=f"Network interface to monitor (default: {DEFAULT_INTERFACE})")
+    parser.add_argument("--rules-dir", default=DEFAULT_RULES_DIR,
+                      help=f"Directory containing Suricata rules (default: {DEFAULT_RULES_DIR})")
+    parser.add_argument("-c", "--count", type=int, default=0,
+                      help="Number of packets to capture (0 for unlimited)")
+    parser.add_argument("-d", "--debug", action="store_true", default=False,
+                      help="Enable debug logging")
     args = parser.parse_args()
 
     global logger
     logger = setup_logging(debug=args.debug)
 
-    logger.info("Starting Network IDS (fusion)")
-    logger.info(f"Interface: {args.interface}")
-    logger.info(f"Suricata: {'disabled' if args.no_suricata else 'enabled'}")
-    if os.geteuid() != 0:
-        logger.error("This script requires root privileges. Run with sudo.")
-        return 1
-
-    # load model
-    if not load_model(args.model, args.scaler):
-        logger.error("Model load failed - exiting")
-        return 1
-
-    use_suricata = not args.no_suricata
+    # Initialize IDS
     global ids_global
-    ids_global = NetworkIDS(interface=args.interface, rules_dir=args.rules_dir, use_suricata=use_suricata)
-
     try:
+        logger.info(f"Starting Suricata IDS on interface {args.interface}")
+        logger.info(f"Using rules from: {args.rules_dir}")
+        
+        ids_global = NetworkIDS(
+            interface=args.interface,
+            rules_dir=args.rules_dir
+        )
+        
+        logger.info("Press Ctrl+C to stop...")
         start_sniffing(interface=args.interface, count=args.count)
+        
     except KeyboardInterrupt:
-        logger.info("Stopping due to KeyboardInterrupt")
-    except Exception:
-        logger.exception("Fatal error in main")
+        logger.info("\nStopping Suricata IDS...")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.exception("Detailed error:")
+        return 1
     finally:
-        if ids_global:
+        if 'ids_global' in globals() and ids_global:
             ids_global.stop()
-        # Summary
-        if ids_global:
-            elapsed = time.time() - ids_global.start_time
-            logger.info("=" * 80)
-            logger.info("Packet Capture Summary:")
-            logger.info("=" * 80)
-            logger.info(f"Total packets processed: {ids_global.packet_count}")
-            logger.info(f"Total attacks detected: {ids_global.attack_count}")
-            logger.info(f"Duration: {elapsed:.2f} seconds")
-            if elapsed > 0:
-                logger.info(f"Average packets/second: {ids_global.packet_count / elapsed:.2f}")
+    
+    # Summary
+    if 'ids_global' in globals() and ids_global:
+        elapsed = time.time() - ids_global.start_time
+        logger.info("=" * 80)
+        logger.info("Packet Capture Summary:")
+        logger.info("=" * 80)
+        logger.info(f"Total packets processed: {ids_global.packet_count}")
+        logger.info(f"Total alerts detected: {ids_global.alert_count}")
+        logger.info(f"Duration: {elapsed:.2f} seconds")
+        if elapsed > 0:
+            logger.info(f"Average packets/second: {ids_global.packet_count/elapsed:.2f}")
+    
     return 0
 
 if __name__ == "__main__":

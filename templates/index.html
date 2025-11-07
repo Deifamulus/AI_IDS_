@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Network Traffic Dashboard</title>
+
+    <!-- Bootstrap & Chart.js -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+    <style>
+        /* ======= Global Dark Cyber Theme ======= */
+        body {
+            background: radial-gradient(circle at top left, #0d0d1a 0%, #000 60%, #0a0a1a 100%);
+            color: #eaeaea;
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        h1 {
+            color: #ffffff;
+            text-shadow: 0 0 10px rgba(0, 162, 255, 0.5), 0 0 20px rgba(255, 0, 76, 0.4);
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        /* ======= Glassmorphic Cards ======= */
+        .card {
+            background: rgba(20, 20, 40, 0.55);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            box-shadow: 0 4px 25px rgba(0, 0, 0, 0.4);
+            transition: all 0.3s ease-in-out;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 0 25px rgba(0, 183, 255, 0.35), 0 0 35px rgba(255, 45, 85, 0.2);
+        }
+
+        .card-title {
+            color: #eaeaea;
+            font-weight: 500;
+        }
+
+        /* ======= Stats Styling ======= */
+        .stat-card {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #00b8ff;
+            text-shadow: 0 0 8px rgba(0, 184, 255, 0.6);
+        }
+
+        /* ======= Packet Rows ======= */
+        .packet-row {
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            font-family: monospace;
+            transition: background 0.3s;
+        }
+
+        .packet-row:hover {
+            background-color: rgba(0, 123, 255, 0.05);
+        }
+
+        /* ======= Alerts ======= */
+        .alert-item {
+            padding: 12px 15px;
+            margin-bottom: 8px;
+            border-radius: 8px;
+            font-family: inherit;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .alert-critical {
+            background: rgba(255, 0, 55, 0.1);
+            border-left: 5px solid #ff0033;
+            box-shadow: 0 0 10px rgba(255, 0, 55, 0.4);
+        }
+
+        .alert-high {
+            background: rgba(255, 90, 0, 0.1);
+            border-left: 5px solid #ff5c00;
+            box-shadow: 0 0 10px rgba(255, 90, 0, 0.3);
+        }
+
+        .alert-medium {
+            background: rgba(0, 123, 255, 0.1);
+            border-left: 5px solid #007bff;
+            box-shadow: 0 0 10px rgba(0, 123, 255, 0.25);
+        }
+
+        .alert-low {
+            background: rgba(255, 255, 255, 0.05);
+            border-left: 5px solid #999;
+            box-shadow: 0 0 8px rgba(255, 255, 255, 0.1);
+        }
+
+        #alerts-container {
+            max-height: 500px;
+            overflow-y: auto;
+            padding-right: 10px;
+            scrollbar-width: thin;
+        }
+
+        #alerts-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #alerts-container::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #ff004c, #00aaff);
+            border-radius: 3px;
+        }
+
+        .badge {
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        /* ======= Neon Color Adjustments ======= */
+        .bg-danger {
+            background-color: #ff1744 !important;
+            color: #fff !important;
+        }
+
+        .bg-warning.text-dark {
+            background-color: #ff9100 !important;
+            color: #111 !important;
+        }
+
+        .bg-info.text-dark {
+            background-color: #00b0ff !important;
+            color: #111 !important;
+        }
+
+        .bg-secondary {
+            background-color: #888 !important;
+            color: #fff !important;
+        }
+
+        .text-danger {
+            color: #ff3366 !important;
+            transition: all 0.5s ease;
+        }
+
+        /* ======= Scrollbars ======= */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #007bff, #ff1744);
+            border-radius: 4px;
+        }
+
+        /* ======= Chart.js Dark Background ======= */
+        canvas {
+            background-color: rgba(15, 15, 30, 0.25);
+            border-radius: 10px;
+        }
+
+        /* ======= Glow Animation for New Alerts ======= */
+        .new-alert {
+            animation: pulseGlow 2s ease-in-out;
+        }
+
+        @keyframes pulseGlow {
+            0% {
+                box-shadow: 0 0 15px rgba(0, 174, 255, 0.8);
+            }
+
+            50% {
+                box-shadow: 0 0 25px rgba(255, 0, 76, 0.8);
+            }
+
+            100% {
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid mt-3">
+        <h1 class="text-center mb-4">Network Traffic Dashboard</h1>
+
+        <!-- Stats Row -->
+        <div class="row">
+            <div class="col-md-2">
+                <div class="card stat-card">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Packets</h5>
+                        <div class="stat-value" id="total-packets">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-2">
+                <div class="card stat-card">
+                    <div class="card-body">
+                        <h5 class="card-title">Alerts</h5>
+                        <div class="stat-value" id="alert-count">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-2">
+                <div class="card stat-card">
+                    <div class="card-body">
+                        <h5 class="card-title">Uptime</h5>
+                        <div class="stat-value" id="uptime">00:00:00</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Packet Sizes (Last 50 packets)</h5>
+                        <canvas id="packetChart" height="100"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Second Row -->
+        <div class="row mt-4">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Top Protocols</h5>
+                        <canvas id="protocolChart" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Top Sources</h5>
+                        <div id="top-sources"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Alerts by Severity</h5>
+                        <canvas id="alertChart" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alerts and Packets Row -->
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Recent Alerts</h5>
+                        <div id="alerts-container"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Recent Packets</h5>
+                        <div id="recent-packets" style="max-height: 300px; overflow-y: auto;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Existing Dashboard Script (unchanged) -->
+    <script>
+        // Initialize charts
+        const packetCtx = document.getElementById('packetChart').getContext('2d');
+        const packetChart = new Chart(packetCtx, {
+            type: 'line',
+            data: {
+                labels: Array(50).fill(''),
+                datasets: [{
+                    label: 'Packet Size (bytes)',
+                    data: [],
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+
+        const protocolCtx = document.getElementById('protocolChart').getContext('2d');
+        const protocolChart = new Chart(protocolCtx, {
+            type: 'doughnut',
+            data: {
+                labels: [],
+                datasets: [{
+                    data: [],
+                    backgroundColor: [
+                        'rgba(255, 99, 132, 0.7)',
+                        'rgba(54, 162, 235, 0.7)',
+                        'rgba(255, 206, 86, 0.7)',
+                        'rgba(75, 192, 192, 0.7)',
+                        'rgba(153, 102, 255, 0.7)'
+                    ]
+                }]
+            }
+        });
+
+        const alertCtx = document.getElementById('alertChart').getContext('2d');
+        const alertChart = new Chart(alertCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Critical', 'High', 'Medium', 'Low'],
+                datasets: [{
+                    label: 'Alerts by Severity',
+                    data: [0, 0, 0, 0],
+                    backgroundColor: [
+                        'rgba(220, 53, 69, 0.7)',
+                        'rgba(255, 193, 7, 0.7)',
+                        'rgba(13, 110, 253, 0.7)',
+                        'rgba(108, 117, 125, 0.7)'
+                    ]
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+
+        // Socket.IO connection with reconnection
+        let socket;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        let reconnectInterval;
+
+        function connect() {
+            socket = io({
+                reconnection: true,
+                reconnectionAttempts: maxReconnectAttempts,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 20000
+            });
+
+            socket.on('connect', function() {
+                console.log('Connected to dashboard');
+                reconnectAttempts = 0;
+                clearInterval(reconnectInterval);
+                fetchInitialState();
+            });
+
+            socket.on('disconnect', function() {
+                console.log('Disconnected from dashboard');
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    console.log(`Will attempt to reconnect in ${delay / 1000} seconds...`);
+                    reconnectInterval = setTimeout(connect, delay);
+                    reconnectAttempts++;
+                }
+            });
+
+            socket.on('connect_error', function(error) {
+                console.error('Connection error:', error);
+            });
+
+            socket.on('update', updateDashboard);
+            socket.on('new_alert', addNewAlert);
+        }
+
+        function fetchInitialState() {
+            fetch('/alerts')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.alerts && data.alerts.length > 0) {
+                        updateAlertCount(data.alerts.length);
+                        updateAlertChart(data.alerts);
+                        data.alerts.slice(0, 20).forEach(alert => addAlertToUI(alert, false));
+                    }
+                })
+                .catch(error => console.error('Error fetching initial state:', error));
+        }
+
+        function updateDashboard(data) {
+            document.getElementById('total-packets').textContent = data.total_packets || 0;
+            document.getElementById('uptime').textContent = data.uptime ? data.uptime.split('.')[0] : '00:00:00';
+
+            if (data.packet_sizes && data.packet_sizes.length > 0) {
+                packetChart.data.datasets[0].data = data.packet_sizes;
+                packetChart.update();
+            }
+
+            if (data.protocols) {
+                protocolChart.data.labels = Object.keys(data.protocols);
+                protocolChart.data.datasets[0].data = Object.values(data.protocols);
+                protocolChart.update();
+            }
+
+            if (data.top_sources) {
+                const topSources = document.getElementById('top-sources');
+                topSources.innerHTML = Object.entries(data.top_sources)
+                    .map(([src, count]) =>
+                        `<div class="d-flex justify-content-between">
+                            <span>${src}</span>
+                            <span class="badge bg-primary">${count}</span>
+                        </div>`
+                    ).join('');
+            }
+
+            if (data.recent_packets) {
+                const recentPackets = document.getElementById('recent-packets');
+                recentPackets.innerHTML = data.recent_packets.map(packet => `
+                    <div class="packet-row ${packet.is_alert ? 'bg-light' : ''}">
+                        <span class="text-muted">${packet.time || ''}</span>
+                        <strong>${packet.protocol || 'N/A'}</strong>
+                        ${packet.src || ''} → ${packet.dst || ''}
+                        <span class="float-end">${packet.length || 0} bytes</span>
+                    </div>
+                `).join('');
+            }
+
+            if (data.alert_count !== undefined) {
+                updateAlertCount(data.alert_count);
+            }
+        }
+
+        function addNewAlert(alert) {
+            addAlertToUI(alert, true);
+            updateAlertCount(parseInt(document.getElementById('alert-count').textContent) + 1);
+
+            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2570/2570-preview.mp3');
+            audio.volume = 0.3;
+            audio.play().catch(e => console.log('Audio play failed:', e));
+        }
+
+        function addAlertToUI(alert, isNew) {
+            const container = document.getElementById('alerts-container');
+            const alertClass = getAlertClass(alert.severity);
+            const time = alert.timestamp || new Date().toISOString().substr(11, 8);
+            const severityText = getSeverityText(alert.severity);
+            const attackInfo = getAttackInfo(alert);
+
+            const alertElement = document.createElement('div');
+            alertElement.className = `alert-item ${alertClass} ${isNew ? 'new-alert' : ''}`;
+            alertElement.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <div>
+                        <span class="badge ${getSeverityBadgeClass(alert.severity)} me-2">${severityText}</span>
+                        <strong>${alert.signature || 'Suspicious Activity'}</strong>
+                    </div>
+                    <small class="text-muted">${time}</small>
+                </div>
+                <div class="mb-1">
+                    <span class="text-nowrap">${alert.src_ip || 'N/A'}:${alert.src_port || '0'}</span>
+                    <i class="fas fa-arrow-right mx-1"></i>
+                    <span class="text-nowrap">${alert.dest_ip || 'N/A'}:${alert.dest_port || '0'}</span>
+                </div>
+                <div class="d-flex flex-wrap gap-2 mb-1">
+                    <span class="badge bg-secondary">${alert.protocol || 'N/A'}</span>
+                    ${alert.category ? `<span class="badge bg-info">${alert.category}</span>` : ''}
+                    ${attackInfo ? `<span class="badge bg-dark">${attackInfo.type}</span>` : ''}
+                </div>
+                ${attackInfo ? `<div class="small text-muted">${attackInfo.description}</div>` : ''}
+            `;
+
+            if (isNew) {
+                container.insertBefore(alertElement, container.firstChild);
+                while (container.children.length > 50) container.removeChild(container.lastChild);
+            } else {
+                container.appendChild(alertElement);
+            }
+        }
+
+        function getAttackInfo(alert) {
+            const signature = (alert.signature || '').toLowerCase();
+            const category = (alert.category || '').toLowerCase();
+
+            if (signature.includes('sql') || category.includes('sql')) {
+                return { type: 'SQL Injection', description: 'Attempted database query manipulation detected.' };
+            } else if (signature.includes('xss') || category.includes('xss')) {
+                return { type: 'XSS Attack', description: 'Cross-Site Scripting attempt detected.' };
+            } else if (signature.includes('bruteforce') || category.includes('bruteforce')) {
+                return { type: 'Brute Force', description: 'Multiple failed login attempts detected.' };
+            } else if (signature.includes('portscan') || category.includes('scan')) {
+                return { type: 'Port Scan', description: 'Network scanning activity detected.' };
+            } else if (signature.includes('dos') || category.includes('dos')) {
+                return { type: 'DoS Attempt', description: 'Possible Denial of Service attack detected.' };
+            } else if (alert.severity <= 2) {
+                return { type: 'Suspicious Activity', description: 'Potential security issue detected.' };
+            }
+
+            return null;
+        }
+
+        function getAlertClass(severity) {
+            if (severity === 1) return 'alert-critical';
+            if (severity === 2) return 'alert-high';
+            if (severity === 3) return 'alert-medium';
+            return 'alert-low';
+        }
+
+        function getSeverityBadgeClass(severity) {
+            if (severity === 1) return 'bg-danger';
+            if (severity === 2) return 'bg-warning text-dark';
+            if (severity === 3) return 'bg-info text-dark';
+            return 'bg-secondary';
+        }
+
+        function getSeverityText(severity) {
+            const levels = { 1: 'Critical', 2: 'High', 3: 'Medium', 4: 'Low' };
+            return levels[severity] || 'Info';
+        }
+
+        function updateAlertCount(count) {
+            const element = document.getElementById('alert-count');
+            if (element) {
+                element.textContent = count;
+                element.classList.add('text-danger');
+                setTimeout(() => element.classList.remove('text-danger'), 1000);
+            }
+        }
+
+        function updateAlertChart(alerts) {
+            const severityCounts = [0, 0, 0, 0];
+            alerts.forEach(alert => {
+                const severity = Math.min(Math.max(1, alert.severity || 3), 4) - 1;
+                severityCounts[severity] = (severityCounts[severity] || 0) + 1;
+            });
+            alertChart.data.datasets[0].data = severityCounts;
+            alertChart.update();
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            connect();
+        });
+    </script>
+</body>
+</html>
