@@ -34,7 +34,7 @@ A sophisticated Network Intrusion Detection System that combines Suricata's rule
 
 1. Clone the repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/luciferwasinnocent999/ai_ids_project.git
    cd ai_ids_project
    ```
 
@@ -186,9 +186,6 @@ ai_ids_project/
   - Enable model quantization for faster inference
   - Implement model distillation for resource-constrained environments
 
-## License
-
-[Specify your license here]
 
 ## Contributing
 
@@ -221,17 +218,3 @@ This project builds upon several research papers and open-source projects:
 - **Suricata**: Network threat detection engine
 - **Scapy**: Packet manipulation library
 
-## Citing This Work
-
-If you use this project in your research, please consider citing:
-
-```
-@misc{ai_ids_project,
-  author = {Your Name},
-  title = {AI-Powered Network Intrusion Detection System},
-  year = {2023},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/yourusername/ai_ids_project}}
-}
-```
